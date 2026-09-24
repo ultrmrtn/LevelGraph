@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>進捗予測</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px 24px; background: #fff; color: #333; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif; -webkit-font-smoothing: antialiased; }
+    main { max-width: 1280px; margin: 0 auto; }
+    .control-panel { display: flex; align-items: flex-start; gap: 20px; padding: 16px; margin-bottom: 24px; border: 1px solid #e7e9ed; border-radius: 12px; background: #f8f9fb; }
+    .date-controls { flex: 1; min-width: 0; }
+    .input-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .date-inputs { display: contents; }
+    .date-row { display: flex; align-items: center; height: 34px; border: 1px solid #dfe3e8; border-radius: 7px; background: #fff; transition: border-color .15s; }
+    .date-row:focus-within { border-color: #4aa3ff; box-shadow: 0 0 0 3px #4aa3ff1a; }
+    .date-row label { min-width: 43px; padding: 0 8px; text-align: center; font-size: 12px; font-weight: 600; color: #667085; border-right: 1px solid #edf0f3; }
+    input[type="date"] { width: 132px; min-width: 0; height: 32px; padding: 4px 7px; border: 0; border-radius: 7px; background: transparent; color: #344054; font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; }
+    input:focus-visible { outline: 2px solid #4aa3ff; outline-offset: 1px; }
+    input[aria-invalid="true"] { outline: 2px solid #d92d20; }
+    #input-error { color: #b42318; margin: 10px 0 0; font-size: 12px; line-height: 1.6; }
+    #input-error:empty, #status:empty { display: none; }
+    .toolbar { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+    button { height: 34px; padding: 0 13px; border: 1px solid #dfe3e8; border-radius: 7px; background: #fff; color: #475467; font: inherit; font-size: 12px; font-weight: 600; white-space: nowrap; cursor: pointer; transition: background .15s, border-color .15s; }
+    button:hover { background: #f0f3f7; border-color: #b8c1ce; }
+    #add-date::before { content: "+"; margin-right: 6px; font-size: 16px; font-weight: 400; vertical-align: -1px; }
+    #save-png { background: #344054; border-color: #344054; color: #fff; }
+    #save-png:hover { background: #1d2939; border-color: #1d2939; }
+    button:focus-visible { outline: 2px solid #4aa3ff; outline-offset: 3px; }
+    button:disabled { opacity: .45; cursor: default; }
+    #status { max-width: 220px; font-size: 12px; line-height: 1.6; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+    .chart-scroll { overflow-x: auto; border-radius: 8px; }
+    svg { display: block; width: 100%; min-width: 960px; height: auto; }
+    @media (max-width: 600px) { body { padding: 16px 8px; } .control-panel { padding: 12px; gap: 12px; flex-direction: column; } .toolbar { width: 100%; } }
+    @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="control-panel">
+    <section class="date-controls" aria-label="実績の日付入力">
+      <p id="date-help" class="visually-hidden">達成日を0%から順に入力してください。「追加」で10%刻みの入力欄が増えます。</p>
+      <div class="input-actions">
+      <div id="date-inputs" class="date-inputs"></div>
+      <button id="add-date" type="button">追加</button>
+      </div>
+      <p id="input-error" role="status" aria-live="polite"></p>
+    </section>
+    <div class="toolbar">
+      <button id="save-png" type="button">PNG保存</button>
+      <span id="status" role="status" aria-live="polite"></span>
+    </div>
+    </div>
+    <div class="chart-scroll" role="region" aria-label="進捗予測グラフ。狭い画面では横にスクロールできます。" tabindex="0">
+      <svg id="chart" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640" role="img" aria-labelledby="chart-description">
+        <desc id="chart-description">日付入力後に進捗グラフを表示します。</desc>
+      </svg>
+    </div>
+    <noscript>グラフを表示するにはJavaScriptを有効にしてください。</noscript>
+  </main>
+  <script>
+    "use strict";
+
+    const svg = document.getElementById("chart");
+    const width = 1200, height = 640;
+    const inputList = document.getElementById("date-inputs");
+    const addButton = document.getElementById("add-date");
+    const inputError = document.getElementById("input-error");
+    const day = 86400000;
+    const toDate = value => new Date(value + "T00:00:00Z");
+
+    function predictProgress(actual) {
+      const data = [...actual];
+      if (actual.length < 2) return { data, intervals: [], factor: 1, forecastDays: [] };
+      const intervals = actual.slice(1).map((point, i) => (toDate(point.date) - toDate(actual[i].date)) / day);
+      // log(区間日数)を区間番号で回帰し、全実績から区間ごとの変化倍率を求める。
+      // 日数そのものの直線外挿と違い、加速時にも負の日数にならない。
+      const center = (intervals.length - 1) / 2;
+      let numerator = 0, denominator = 0;
+      intervals.forEach((days, i) => {
+        numerator += (i - center) * Math.log(days);
+        denominator += (i - center) ** 2;
+      });
+      const slope = denominator ? numerator / denominator : 0;
+      const factor = Math.exp(slope);
+      const last = actual[actual.length - 1];
+      let time = toDate(last.date).getTime();
+      const forecastDays = [];
+      for (let percent = last.percent + 10, step = 1; percent <= 100; percent += 10, step++) {
+        // 直近の実績ペースを起点に倍率を適用。表示粒度は1日、最短1日。
+        const days = Math.max(1, Math.round(intervals[intervals.length - 1] * Math.exp(slope * step)));
+        time += days * day;
+        const date = new Date(time);
+        if (!Number.isFinite(date.getTime()) || date.getUTCFullYear() > 9999) {
+          throw new Error("予測日が表示できる範囲を超えています。日付を確認してください。グラフは直前の表示を維持しています。");
+        }
+        forecastDays.push(days);
+        data.push({ percent, date: date.toISOString().slice(0, 10), actual: false });
+      }
+      return { data, intervals, factor, forecastDays };
+    }
+
+    function updateChart() {
+      const actual = [];
+      const inputs = [...inputList.querySelectorAll("input")];
+      inputError.textContent = "";
+      inputs.forEach(input => input.removeAttribute("aria-invalid"));
+      for (let i = 0; i < inputs.length; i++) {
+        const input = inputs[i];
+        if (!input.value) {
+          if (inputs.slice(i + 1).some(next => next.value)) {
+            input.setAttribute("aria-invalid", "true");
+            inputError.textContent = "日付は進捗率の低い順に入力してください。グラフは直前の表示を維持しています。";
+            return;
+          }
+          break;
+        }
+        const previous = actual.length ? toDate(actual[actual.length - 1].date) : null;
+        const current = toDate(input.value);
+        if (!Number.isFinite(current.getTime()) || current.getUTCFullYear() > 9999 || current.getUTCFullYear() < 1 || (previous && current <= previous)) {
+          input.setAttribute("aria-invalid", "true");
+          inputError.textContent = `${i * 10}%の日付を確認してください。前の実績がある場合は、それより後の日付が必要です。グラフは直前の表示を維持しています。`;
+          return;
+        }
+        actual.push({ percent: i * 10, date: input.value, actual: true });
+      }
+      let prediction;
+      try {
+        prediction = predictProgress(actual);
+      } catch (error) {
+        inputError.textContent = error.message;
+        return;
+      }
+      const { data } = prediction;
+      renderChart(data);
+    }
+
+    function addDateInput(value = "") {
+      const percent = inputList.children.length * 10;
+      if (percent > 100) return;
+      const row = document.createElement("div");
+      row.className = "date-row";
+      const label = document.createElement("label");
+      label.htmlFor = `date-${percent}`;
+      label.textContent = `${percent}%`;
+      const input = document.createElement("input");
+      input.type = "date";
+      input.id = label.htmlFor;
+      input.value = value;
+      input.min = "0001-01-01";
+      input.max = "9999-12-31";
+      input.setAttribute("aria-describedby", "date-help input-error");
+      input.addEventListener("change", updateChart);
+      row.append(label, input);
+      inputList.appendChild(row);
+      addButton.disabled = percent === 100;
+      return input;
+    }
+    addButton.addEventListener("click", () => addDateInput()?.focus());
+    addDateInput("2026-07-17");
+
+    function renderChart(data) {
+      // UTCを使い、タイムゾーンや夏時間による日付・間隔のずれを防ぐ。
+      const points = data.map(d => ({ ...d, dateObject: toDate(d.date) }));
+      svg.replaceChildren();
+      if (!points.length) {
+        const desc = document.createElementNS("http://www.w3.org/2000/svg", "desc");
+        desc.id = "chart-description";
+        desc.textContent = "0%の日付を入力してください。";
+        svg.appendChild(desc);
+        return;
+      }
+      const margin = { top: 64, right: 64, bottom: 64, left: 68 };
+      const plotWidth = width - margin.left - margin.right;
+      const plotHeight = height - margin.top - margin.bottom;
+      const start = points[0].dateObject.getTime();
+      const end = points.length > 1 ? points[points.length - 1].dateObject.getTime() : start + day;
+      const x = date => margin.left + (date.getTime() - start) / (end - start) * plotWidth;
+      const y = percent => height - margin.bottom - percent / 100 * plotHeight;
+      const colors = { actual: "#ff9900", forecast: "#4aa3ff", label: "#333333", grid: "#cccccc" };
+
+      function add(tag, attributes, parent = svg, text) {
+        const element = document.createElementNS("http://www.w3.org/2000/svg", tag);
+        for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+        if (text !== undefined) element.textContent = text;
+        parent.appendChild(element);
+        return element;
+      }
+
+      add("desc", { id: "chart-description" }, svg, data.map(d => `${d.percent}%：${d.date}（${d.actual ? "実績" : "予測"}）`).join("、"));
+      // 背景・文字スタイルもSVG内に含め、PNGに同じ見た目で出力する。
+      add("rect", { width, height, fill: "#ffffff" });
+      const grid = add("g", { stroke: colors.grid, "stroke-opacity": 0.55, "stroke-width": 1, "stroke-dasharray": "3 5" });
+      const ticks = add("g", { fill: colors.label, "font-family": "Arial, sans-serif", "font-size": 16 });
+      for (let percent = 0; percent <= 100; percent += 20) {
+        add("line", { x1: margin.left, y1: y(percent), x2: width - margin.right, y2: y(percent) }, grid);
+        add("text", { x: margin.left - 16, y: y(percent), "text-anchor": "end", "dominant-baseline": "middle" }, ticks, String(percent));
+      }
+
+      const dateTicks = [];
+      for (let i = 0; i <= 7; i++) {
+        dateTicks.push(new Date(start + (end - start) * i / 7));
+      }
+      for (const date of dateTicks) {
+        const label = date.toISOString().slice(0, (end - start) / day < 240 ? 10 : 7).replaceAll("-", "/");
+        add("line", { x1: x(date), y1: margin.top, x2: x(date), y2: height - margin.bottom }, grid);
+        add("text", { x: x(date), y: height - margin.bottom + 32, "text-anchor": "middle" }, ticks, label);
+      }
+
+      add("path", { d: `M ${margin.left} ${margin.top} V ${height - margin.bottom} H ${width - margin.right}`, fill: "none", stroke: "#888888", "stroke-width": 1 });
+
+      const actualPoints = points.filter(d => d.actual);
+      const forecastPoints = [actualPoints[actualPoints.length - 1], ...points.filter(d => !d.actual)];
+      const coordinates = items => items.map(d => `${x(d.dateObject)},${y(d.percent)}`).join(" ");
+      add("polyline", { id: "actual-line", points: coordinates(actualPoints), fill: "none", stroke: colors.actual, "stroke-width": 3, "stroke-linecap": "round", "stroke-linejoin": "round" });
+      add("polyline", { id: "forecast-line", points: coordinates(forecastPoints), fill: "none", stroke: colors.forecast, "stroke-width": 2.5, "stroke-dasharray": "2 7", "stroke-linecap": "round", "stroke-linejoin": "round" });
+
+      function drawPoint(d) {
+        const circle = add("circle", { "data-percent": d.percent, cx: x(d.dateObject), cy: y(d.percent), r: 5.5, fill: d.actual ? colors.actual : colors.forecast });
+        add("title", {}, circle, `${d.date.replaceAll("-", "/")} — ${d.percent}%（${d.actual ? "実績" : "予測"}）`);
+      }
+      // 予測点を先に描き、達成済みの0%・10%を最後にオレンジで描く。
+      points.filter(d => !d.actual).forEach(drawPoint);
+      actualPoints.forEach(drawPoint);
+
+      const labels = add("g", { fill: colors.label, "font-family": "Arial, sans-serif", "font-size": 23, "font-weight": 700, "text-anchor": "middle" });
+      for (const d of points) {
+        add("text", { x: x(d.dateObject), y: y(d.percent) - 18 }, labels, d.date.slice(5).replace("-", "/"));
+      }
+    }
+
+    updateChart();
+
+    document.getElementById("save-png").addEventListener("click", async () => {
+      const button = document.getElementById("save-png");
+      const status = document.getElementById("status");
+      button.disabled = true;
+      status.textContent = "";
+      let svgUrl;
+      try {
+        const source = new XMLSerializer().serializeToString(svg);
+        // ユーザー操作の直後に開く（画像変換を待つと開けない場合がある）。
+        let fileHandle;
+        if (typeof window.showSaveFilePicker === "function") {
+          try {
+            fileHandle = await window.showSaveFilePicker({
+              suggestedName: "progress-forecast.png",
+              types: [{ description: "PNG画像", accept: { "image/png": [".png"] } }]
+            });
+          } catch (error) {
+            if (error.name === "AbortError") {
+              status.textContent = "保存をキャンセルしました";
+              return;
+            }
+            if (error.name !== "SecurityError" && error.name !== "NotAllowedError") throw error;
+            // 埋め込み表示などでダイアログが許可されない場合は通常のダウンロードへ。
+          }
+        }
+        svgUrl = URL.createObjectURL(new Blob([source], { type: "image/svg+xml;charset=utf-8" }));
+        const image = new Image();
+        await new Promise((resolve, reject) => {
+          image.onload = resolve;
+          image.onerror = () => reject(new Error("SVGの読み込みに失敗しました"));
+          image.src = svgUrl;
+        });
+        const canvas = document.createElement("canvas");
+        canvas.width = width * 2;
+        canvas.height = height * 2;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Canvasを利用できません");
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+        if (!blob) throw new Error("PNGの作成に失敗しました");
+        if (fileHandle) {
+          const writable = await fileHandle.createWritable();
+          try {
+            await writable.write(blob);
+            await writable.close();
+          } catch (error) {
+            await writable.abort().catch(() => {});
+            throw error;
+          }
+          status.textContent = "指定した保存先にPNGを保存しました";
+          return;
+        }
+        const pngUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = pngUrl;
+        link.download = "progress-forecast.png";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(pngUrl), 60000);
+        status.textContent = "ダウンロードを開始しました。保存先を選ぶには、ブラウザ設定の「ダウンロード前に保存場所を確認」を有効にしてください。";
+      } catch (error) {
+        status.textContent = "PNG保存に失敗しました。再度お試しください。";
+        console.error(error);
+      } finally {
+        if (svgUrl) URL.revokeObjectURL(svgUrl);
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
