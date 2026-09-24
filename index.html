@@ -14,7 +14,8 @@
     .date-inputs { display: contents; }
     .date-row { display: flex; align-items: center; height: 34px; border: 1px solid #dfe3e8; border-radius: 7px; background: #fff; transition: border-color .15s; }
     .date-row:focus-within { border-color: #4aa3ff; box-shadow: 0 0 0 3px #4aa3ff1a; }
-    .date-row label { min-width: 43px; padding: 0 8px; text-align: center; font-size: 12px; font-weight: 600; color: #667085; border-right: 1px solid #edf0f3; }
+    .percent-field { display: flex; align-items: center; gap: 2px; padding-right: 7px; border-right: 1px solid #edf0f3; color: #667085; font-size: 12px; }
+    input[type="number"] { width: 57px; height: 32px; padding: 4px 0 4px 7px; border: 0; border-radius: 7px; background: transparent; color: #344054; font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; }
     input[type="date"] { width: 132px; min-width: 0; height: 32px; padding: 4px 7px; border: 0; border-radius: 7px; background: transparent; color: #344054; font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; }
     input:focus-visible { outline: 2px solid #4aa3ff; outline-offset: 1px; }
     input[aria-invalid="true"] { outline: 2px solid #d92d20; }
@@ -70,26 +71,40 @@
     const day = 86400000;
     const toDate = value => new Date(value + "T00:00:00Z");
 
+    const nextTen = percent => (Math.floor(percent / 10) + 1) * 10;
+
     function predictProgress(actual) {
       const data = [...actual];
       if (actual.length < 2) return { data, intervals: [], factor: 1, forecastDays: [] };
-      const intervals = actual.slice(1).map((point, i) => (toDate(point.date) - toDate(actual[i].date)) / day);
-      // log(区間日数)を区間番号で回帰し、全実績から区間ごとの変化倍率を求める。
-      // 日数そのものの直線外挿と違い、加速時にも負の日数にならない。
-      const center = (intervals.length - 1) / 2;
+      const intervals = actual.slice(1).map((point, i) => {
+        const previous = actual[i];
+        return {
+          midpoint: (point.percent + previous.percent) / 20,
+          daysPerTen: (toDate(point.date) - toDate(previous.date)) / day * 10 / (point.percent - previous.percent)
+        };
+      });
+      // ???????10????????????????
+      // log(??)???????????????10????????????????
+      const center = intervals.reduce((sum, item) => sum + item.midpoint, 0) / intervals.length;
+      const meanLog = intervals.reduce((sum, item) => sum + Math.log(item.daysPerTen), 0) / intervals.length;
       let numerator = 0, denominator = 0;
-      intervals.forEach((days, i) => {
-        numerator += (i - center) * Math.log(days);
-        denominator += (i - center) ** 2;
+      intervals.forEach(item => {
+        numerator += (item.midpoint - center) * (Math.log(item.daysPerTen) - meanLog);
+        denominator += (item.midpoint - center) ** 2;
       });
       const slope = denominator ? numerator / denominator : 0;
       const factor = Math.exp(slope);
       const last = actual[actual.length - 1];
       let time = toDate(last.date).getTime();
       const forecastDays = [];
-      for (let percent = last.percent + 10, step = 1; percent <= 100; percent += 10, step++) {
-        // 直近の実績ペースを起点に倍率を適用。表示粒度は1日、最短1日。
-        const days = Math.max(1, Math.round(intervals[intervals.length - 1] * Math.exp(slope * step)));
+      let previousPercent = last.percent;
+      const lastInterval = intervals[intervals.length - 1];
+      for (let percent = nextTen(last.percent); percent <= 100; percent += 10) {
+        // 22%?30%??8???????????????????????????
+        const midpoint = (previousPercent + percent) / 20;
+        const daysPerTen = lastInterval.daysPerTen * Math.exp(slope * (midpoint - lastInterval.midpoint));
+        const days = Math.max(1, Math.round(daysPerTen * (percent - previousPercent) / 10));
+        previousPercent = percent;
         time += days * day;
         const date = new Date(time);
         if (!Number.isFinite(date.getTime()) || date.getUTCFullYear() > 9999) {
@@ -101,29 +116,43 @@
       return { data, intervals, factor, forecastDays };
     }
 
+    function refreshAddButton() {
+      const rows = [...inputList.children];
+      const last = rows.length ? rows[rows.length - 1].querySelector('input[type="number"]') : null;
+      addButton.disabled = !!last && (last.value === "" || !Number.isFinite(Number(last.value)) || Number(last.value) < 0 || Number(last.value) >= 100);
+    }
+
     function updateChart() {
+      refreshAddButton();
       const actual = [];
-      const inputs = [...inputList.querySelectorAll("input")];
+      const rows = [...inputList.children];
       inputError.textContent = "";
-      inputs.forEach(input => input.removeAttribute("aria-invalid"));
-      for (let i = 0; i < inputs.length; i++) {
-        const input = inputs[i];
+      inputList.querySelectorAll("input").forEach(input => input.removeAttribute("aria-invalid"));
+      for (let i = 0; i < rows.length; i++) {
+        const percentInput = rows[i].querySelector('input[type="number"]');
+        const input = rows[i].querySelector('input[type="date"]');
+        const percent = Number(percentInput.value);
         if (!input.value) {
-          if (inputs.slice(i + 1).some(next => next.value)) {
+          if (rows.slice(i + 1).some(row => row.querySelector('input[type="date"]').value)) {
             input.setAttribute("aria-invalid", "true");
-            inputError.textContent = "日付は進捗率の低い順に入力してください。グラフは直前の表示を維持しています。";
+            inputError.textContent = "??????????????????????????????";
             return;
           }
           break;
+        }
+        if (percentInput.value === "" || !Number.isFinite(percent) || percent < 0 || percent > 100 || (actual.length && percent <= actual[actual.length - 1].percent)) {
+          percentInput.setAttribute("aria-invalid", "true");
+          inputError.textContent = "????0?100%????????????????????????????????????????";
+          return;
         }
         const previous = actual.length ? toDate(actual[actual.length - 1].date) : null;
         const current = toDate(input.value);
         if (!Number.isFinite(current.getTime()) || current.getUTCFullYear() > 9999 || current.getUTCFullYear() < 1 || (previous && current <= previous)) {
           input.setAttribute("aria-invalid", "true");
-          inputError.textContent = `${i * 10}%の日付を確認してください。前の実績がある場合は、それより後の日付が必要です。グラフは直前の表示を維持しています。`;
+          inputError.textContent = `${percent}%????????????????????????????????????????????????????????`;
           return;
         }
-        actual.push({ percent: i * 10, date: input.value, actual: true });
+        actual.push({ percent, date: input.value, actual: true });
       }
       let prediction;
       try {
@@ -136,29 +165,44 @@
       renderChart(data);
     }
 
-    function addDateInput(value = "") {
-      const percent = inputList.children.length * 10;
-      if (percent > 100) return;
+    function addDateInput() {
+      refreshAddButton();
+      if (addButton.disabled) return;
+      const rowIndex = inputList.children.length;
+      const lastRow = inputList.children[rowIndex - 1];
+      const percent = lastRow ? nextTen(Number(lastRow.querySelector('input[type="number"]').value)) : 0;
       const row = document.createElement("div");
       row.className = "date-row";
-      const label = document.createElement("label");
-      label.htmlFor = `date-${percent}`;
-      label.textContent = `${percent}%`;
+      const percentField = document.createElement("div");
+      percentField.className = "percent-field";
+      const percentInput = document.createElement("input");
+      percentInput.type = "number";
+      percentInput.min = "0";
+      percentInput.max = "100";
+      percentInput.step = "any";
+      percentInput.value = String(percent);
+      percentInput.setAttribute("aria-label", `${rowIndex + 1}???????%?`);
+      percentInput.setAttribute("aria-describedby", "date-help input-error");
+      percentInput.addEventListener("input", updateChart);
+      const unit = document.createElement("span");
+      unit.textContent = "%";
+      unit.setAttribute("aria-hidden", "true");
+      percentField.append(percentInput, unit);
       const input = document.createElement("input");
       input.type = "date";
-      input.id = label.htmlFor;
-      input.value = value;
+      input.id = `date-${rowIndex}`;
       input.min = "0001-01-01";
       input.max = "9999-12-31";
+      input.setAttribute("aria-label", `${rowIndex + 1}??????`);
       input.setAttribute("aria-describedby", "date-help input-error");
       input.addEventListener("change", updateChart);
-      row.append(label, input);
+      row.append(percentField, input);
       inputList.appendChild(row);
-      addButton.disabled = percent === 100;
+      refreshAddButton();
       return input;
     }
     addButton.addEventListener("click", () => addDateInput()?.focus());
-    addDateInput("2026-07-17");
+    addDateInput();
 
     function renderChart(data) {
       // UTCを使い、タイムゾーンや夏時間による日付・間隔のずれを防ぐ。
