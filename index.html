@@ -41,7 +41,7 @@
   <main>
     <div class="control-panel">
     <section class="date-controls" aria-label="実績の日付入力">
-      <p id="date-help" class="visually-hidden">達成日を0%から順に入力してください。「追加」で10%刻みの入力欄が増えます。</p>
+      <p id="date-help" class="visually-hidden">進捗率と達成日を小さい順に入力してください。「追加」は次の10%単位の値になります。</p>
       <div class="input-actions">
       <div id="date-inputs" class="date-inputs"></div>
       <button id="add-date" type="button">追加</button>
@@ -83,8 +83,8 @@
           daysPerTen: (toDate(point.date) - toDate(previous.date)) / day * 10 / (point.percent - previous.percent)
         };
       });
-      // ???????10????????????????
-      // log(??)???????????????10????????????????
+      // 任意の進捗差を10ポイントあたりの日数に換算する。
+      // 日数の対数を区間の進捗中点で回帰し、10ポイントごとの変化倍率を求める。
       const center = intervals.reduce((sum, item) => sum + item.midpoint, 0) / intervals.length;
       const meanLog = intervals.reduce((sum, item) => sum + Math.log(item.daysPerTen), 0) / intervals.length;
       let numerator = 0, denominator = 0;
@@ -100,7 +100,7 @@
       let previousPercent = last.percent;
       const lastInterval = intervals[intervals.length - 1];
       for (let percent = nextTen(last.percent); percent <= 100; percent += 10) {
-        // 22%?30%??8???????????????????????????
+        // 22%から30%なら8ポイント分。等間隔の実績では従来の計算と一致する。
         const midpoint = (previousPercent + percent) / 20;
         const daysPerTen = lastInterval.daysPerTen * Math.exp(slope * (midpoint - lastInterval.midpoint));
         const days = Math.max(1, Math.round(daysPerTen * (percent - previousPercent) / 10));
@@ -135,21 +135,23 @@
         if (!input.value) {
           if (rows.slice(i + 1).some(row => row.querySelector('input[type="date"]').value)) {
             input.setAttribute("aria-invalid", "true");
-            inputError.textContent = "??????????????????????????????";
+            inputError.textContent = "途中の日付が未入力です。グラフは直前の表示を維持しています。";
             return;
           }
           break;
         }
         if (percentInput.value === "" || !Number.isFinite(percent) || percent < 0 || percent > 100 || (actual.length && percent <= actual[actual.length - 1].percent)) {
           percentInput.setAttribute("aria-invalid", "true");
-          inputError.textContent = "????0?100%????????????????????????????????????????";
+          inputError.textContent = actual.length && percentInput.value !== "" && Number.isFinite(percent) && percent >= 0 && percent <= 100
+            ? `${i + 1}点目の進捗率は、前の${actual[actual.length - 1].percent}%より大きい値を入力してください。`
+            : "進捗率は0～100%で入力してください。";
           return;
         }
         const previous = actual.length ? toDate(actual[actual.length - 1].date) : null;
         const current = toDate(input.value);
         if (!Number.isFinite(current.getTime()) || current.getUTCFullYear() > 9999 || current.getUTCFullYear() < 1 || (previous && current <= previous)) {
           input.setAttribute("aria-invalid", "true");
-          inputError.textContent = `${percent}%????????????????????????????????????????????????????????`;
+          inputError.textContent = `${percent}%の日付を確認してください。前の実績より後の日付が必要です。`;
           return;
         }
         actual.push({ percent, date: input.value, actual: true });
@@ -181,7 +183,7 @@
       percentInput.max = "100";
       percentInput.step = "any";
       percentInput.value = String(percent);
-      percentInput.setAttribute("aria-label", `${rowIndex + 1}???????%?`);
+      percentInput.setAttribute("aria-label", `${rowIndex + 1}点目の進捗率（%）`);
       percentInput.setAttribute("aria-describedby", "date-help input-error");
       percentInput.addEventListener("input", updateChart);
       const unit = document.createElement("span");
@@ -193,7 +195,7 @@
       input.id = `date-${rowIndex}`;
       input.min = "0001-01-01";
       input.max = "9999-12-31";
-      input.setAttribute("aria-label", `${rowIndex + 1}??????`);
+      input.setAttribute("aria-label", `${rowIndex + 1}点目の達成日`);
       input.setAttribute("aria-describedby", "date-help input-error");
       input.addEventListener("change", updateChart);
       row.append(percentField, input);
@@ -211,7 +213,7 @@
       if (!points.length) {
         const desc = document.createElementNS("http://www.w3.org/2000/svg", "desc");
         desc.id = "chart-description";
-        desc.textContent = "0%の日付を入力してください。";
+        desc.textContent = "進捗率と達成日を入力してください。";
         svg.appendChild(desc);
         return;
       }
